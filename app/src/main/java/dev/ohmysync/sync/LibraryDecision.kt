@@ -5,7 +5,7 @@ enum class LibraryAction { Unchanged, EstablishBaseline, Upload, Download, Delet
 
 data class LibraryBaseline(val hash: String?)
 
-/** 冲突不能推进共同基线；删除是可审核的计划，调用方不得直接执行。 */
+/** 冲突不能推进基线；删除计划须备份、记录日志、二次确认缺失并由用户启用传播。 */
 fun decideLibrary(localHash: String?, remoteHash: String?, baseline: LibraryBaseline?): LibraryAction {
     if (localHash == remoteHash) {
         return if (baseline != null && baseline.hash == localHash) LibraryAction.Unchanged

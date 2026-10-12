@@ -13,6 +13,7 @@ import dev.ohmysync.data.SyncTask
 import dev.ohmysync.cloud.CloudFolder
 import dev.ohmysync.data.LibraryVersion
 import dev.ohmysync.sync.LibrarySync
+import dev.ohmysync.sync.listLibraryFiles
 import androidx.documentfile.provider.DocumentFile
 import androidx.core.net.toUri
 import java.io.File
@@ -44,6 +45,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         check(version.taskId == task.id && account.value?.driveId == task.driveId) { "请连接此历史对应的 OneDrive 账户" }
         withContext(Dispatchers.IO) {
             app.syncLock.withLock {
+                val librarySync = LibrarySync(app) {}
                 val parts = Paths.segments(version.path)
                 val archiveRoot = app.cloud.ensureFolder(listOf("轻同步历史", task.id))
                 val item = app.cloud.child(archiveRoot, "${version.hash}.bin") ?: error("云端历史文件不存在")
@@ -53,18 +55,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 check(temp.length() == version.size && temp.inputStream().use { LibrarySync.digest(it) } == version.hash) { "历史内容校验失败，未写入曲库" }
                 val root = DocumentFile.fromTreeUri(app, task.treeUri.toUri())
                 check(root != null && root.isDirectory && root.canWrite()) { "请重新选择手机曲库授予写入权限" }
-                val parent = LibrarySync.localFolder(root, parts.dropLast(1).joinToString("/"))
+                librarySync.recover(task, root)
+                val parent = LibrarySync.localFolder(app, root, parts.dropLast(1).joinToString("/"))
                 val name = parts.last()
                 val suffix = "恢复-${UUID.randomUUID().toString().take(8)}"
                 val copyName = if (name.contains('.')) "${name.substringBeforeLast('.').take(160)}.$suffix.${name.substringAfterLast('.')}"
                     else "${name.take(180)}.$suffix"
-                check(parent.findFile(copyName) == null) { "恢复副本名称冲突，请重试" }
-                val file = parent.createFile("application/octet-stream", copyName) ?: error("无法创建恢复副本")
-                app.contentResolver.openOutputStream(file.uri, "wt").use { output ->
-                    check(output != null) { "无法写入恢复副本" }
-                    temp.inputStream().use { it.copyTo(output, 64 * 1024) }
-                }
-                check(app.contentResolver.openInputStream(file.uri)?.use { LibrarySync.digest(it) } == version.hash) { "恢复副本校验失败，请重试" }
+                check(listLibraryFiles(app, parent).none { it.name == copyName }) { "恢复副本名称冲突，请重试" }
+                val copyPath = (parts.dropLast(1) + copyName).joinToString("/")
+                librarySync.restore(task, copyPath, version.hash, temp, root)
                 notify("历史已恢复为副本：$copyName，原文件保留")
             }
         }
@@ -108,7 +107,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         check(account.value?.driveId == task.driveId) { "请连接任务对应的 OneDrive 账户" }
         check(running.value?.taskId != task.id) { "请先停止同步，再编辑任务" }
         app.scheduler.cancelAndWait(task.id)
-        app.store.saveTask(task)
+        app.syncLock.withLock {
+            val pending = app.store.current().operations.filter { it.taskId == task.id }
+            check(pending.all { task.twoWay && it.driveId == task.driveId && it.treeUri == task.treeUri && it.remotePath == task.remotePath }) {
+                "此任务有未完成的曲库操作，请先立即同步恢复，再修改目录或模式"
+            }
+            app.store.saveTask(task)
+        }
         app.scheduler.schedule(task)
         onSaved()
         notify("任务已保存，可点击立即同步")

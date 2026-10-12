@@ -32,6 +32,15 @@ data class CloudItem(val id: String, val etag: String, val isFolder: Boolean)
 class OneDriveClient(private val http: OkHttpClient, private val token: suspend (Boolean) -> String,
                      private val base: String = "https://graph.microsoft.com/v1.0/me/drive") : CloudStorage {
     constructor(http: OkHttpClient, auth: OneDriveAuth) : this(http, { force -> auth.token(force) })
+    override suspend fun move(item: CloudItem, parent: String, name: String): CloudItem {
+        Paths.validateName(name)
+        check(!item.isFolder && item.etag.isNotBlank()) { "文件缺少可验证的版本，不能移入历史" }
+        val body = JSONObject().put("parentReference", JSONObject().put("id", parent))
+            .put("name", name).put("@microsoft.graph.conflictBehavior", "fail")
+        val value = request("$base/items/${enc(item.id)}", "PATCH", body, etag = item.etag)
+        check(value.getString("id") == item.id && value.optString("eTag").isNotBlank()) { "云端移动结果不完整，将在下次同步核对" }
+        return CloudItem(value.getString("id"), value.getString("eTag"), false)
+    }
     override suspend fun listFiles(parent: String): List<RemoteEntry> {
         val result = mutableListOf<RemoteEntry>()
         var url: String? = "$base/items/${enc(parent)}/children?\$top=200"

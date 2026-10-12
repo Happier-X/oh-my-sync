@@ -16,8 +16,9 @@ android {
         applicationId = "dev.ohmysync"
         minSdk = 26
         targetSdk = 37
-        versionCode = 2
+        versionCode = 4
         versionName = "0.0.1"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { compose = true; buildConfig = true }
     signingConfigs {
@@ -60,4 +61,6 @@ dependencies {
     testImplementation("org.json:json:20260814")
     testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.0")
     testImplementation("com.squareup.okhttp3:okhttp-tls:5.5.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("junit:junit:4.13.2")
 }

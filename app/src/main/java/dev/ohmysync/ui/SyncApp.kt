@@ -1,9 +1,7 @@
 package dev.ohmysync.ui
 
-import android.Manifest
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -63,19 +61,16 @@ fun SyncApp(model: MainViewModel) {
         var editingId by rememberSaveable { mutableStateOf<String?>(null) }
         var historyId by rememberSaveable { mutableStateOf<String?>(null) }
         val editing = editingId?.let { id -> state.tasks.find { it.id == id } }
-        val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (!granted) model.notify("通知未开启，可在应用内查看同步进度")
-        }
         fun addTask() {
             if (account == null) { page = "账户"; model.notify("连接 OneDrive 后即可添加任务") }
             else {
                 editingId = null
                 page = "编辑"
-                if (Build.VERSION.SDK_INT >= 33) permission.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
         BackHandler(page == "编辑") { page = "任务" }
         BackHandler(page == "历史") { page = "任务" }
+        StartupAccess(model)
         Scaffold(
             bottomBar = {
                 if (page != "编辑") NavigationBar(showDivider = false) {
@@ -121,6 +116,39 @@ fun SyncApp(model: MainViewModel) {
                         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             item { PageHeading("曲库历史", "恢复为副本，保留当前文件") }
                             item { TextButton(text = "返回任务", onClick = { page = "任务" }) }
+                            val pending = state.operations.filter { it.taskId == historyId }
+                            if (pending.isNotEmpty()) item {
+                                Card(Modifier.fillMaxWidth()) {
+                                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text("${pending.size} 个未完成操作", fontWeight = FontWeight.Bold)
+                                        Muted(pending.joinToString("\n") { it.path })
+                                        Muted("下一次同步会先核对原文件、临时文件与保留副本。遇到新的外部修改会停止，保留全部版本。")
+                                        if (task != null) TextButton(text = "继续同步并恢复", onClick = { model.sync(task) })
+                                    }
+                                }
+                            }
+                            val events = state.libraryEvents.filter { it.taskId == historyId }
+                            val deletes = task?.let { task -> state.deleteCandidates.filter {
+                                it.key.startsWith("${task.driveId}/${task.id}/${task.remotePath}/")
+                            } }.orEmpty()
+                            if (deletes.isNotEmpty()) item {
+                                Card(Modifier.fillMaxWidth()) {
+                                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text("${deletes.size} 个删除候选", fontWeight = FontWeight.Bold)
+                                        Muted(if (task?.syncDeletes == true) "下一次完整扫描会再次核对，间隔至少一分钟。大批缺失会停止传播。" else "当前仅提示。可在任务设置中单独确认启用删除传播。")
+                                        deletes.forEach { candidate ->
+                                            val prefix = "${task?.driveId}/${task?.id}/${task?.remotePath}/"
+                                            Muted("${candidate.key.removePrefix(prefix)}\n${if (candidate.direction == "DeleteLocal") "云端缺失 → 待隔离手机版" else "手机缺失 → 待移入云端历史"}")
+                                        }
+                                    }
+                                }
+                            }
+                            if (events.isNotEmpty()) item {
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text("最近曲库操作", fontWeight = FontWeight.Bold)
+                                    events.take(10).forEach { Muted("${formatTime(it.time)} · ${it.path}\n${it.message}") }
+                                }
+                            }
                             val versions = state.versions.filter { it.taskId == historyId }
                             if (versions.isEmpty()) item { Muted("曲库第一次同步后会在这里保存版本。") }
                             items(versions) { version ->
@@ -240,6 +268,7 @@ private fun TaskCard(task: SyncTask, active: RunningSync?, queued: Boolean, reco
                 Badge(if (task.wifiOnly) "仅 Wi-Fi" else "所有网络")
                 if (task.chargingOnly) Badge("充电时")
                 Badge(if (task.twoWay) "双向曲库 · 保留历史" else if (task.overwrite) "覆盖同名文件" else "保留云端冲突")
+                if (task.twoWay) Badge(if (task.syncDeletes) "删除传播已开启" else "删除仅提示")
             }
             if (active != null) {
                 Muted(active.file)
@@ -279,6 +308,8 @@ private fun TaskEditor(existing: SyncTask?, account: Account?, onSave: (SyncTask
     var charging by rememberSaveable(existing?.id) { mutableStateOf(existing?.chargingOnly ?: false) }
     var overwrite by rememberSaveable(existing?.id) { mutableStateOf(existing?.overwrite ?: false) }
     var twoWay by rememberSaveable(existing?.id) { mutableStateOf(existing?.twoWay ?: true) }
+    var syncDeletes by rememberSaveable(existing?.id) { mutableStateOf(existing?.syncDeletes ?: false) }
+    var confirmDeletes by rememberSaveable(existing?.id) { mutableStateOf(false) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { selected ->
         if (selected != null) try {
             context.contentResolver.takePersistableUriPermission(selected, Intent.FLAG_GRANT_READ_URI_PERMISSION or
@@ -320,10 +351,22 @@ private fun TaskEditor(existing: SyncTask?, account: Account?, onSave: (SyncTask
                     ToggleRow("仅 Wi-Fi 同步", "使用系统认定的不计费网络", wifi) { wifi = it }
                     ToggleRow("仅充电时同步", "适合较大的备份任务", charging) { charging = it }
                     if (!twoWay) ToggleRow("允许覆盖云端同名文件", "开启后，手机内容会替换云端同名文件", overwrite) { overwrite = it }
+                    if (twoWay) {
+                        ToggleRow("同步删除", "一端删歌后，另一端未修改的歌曲会移出有效曲库", syncDeletes) {
+                            if (it) confirmDeletes = true else { syncDeletes = false; confirmDeletes = false }
+                        }
+                        if (confirmDeletes) {
+                            Muted("启用后会自动传播删除：先保存历史，手机原文件改名隔离，云端原文件移入历史目录，不永久清除。缺失需两次完整扫描确认；删除与修改冲突、大批缺失会停止。")
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = { confirmDeletes = false }) { Text("暂不开启") }
+                                Button(onClick = { syncDeletes = true; confirmDeletes = false }) { Text("确认启用删除传播") }
+                            }
+                        }
+                    }
                 }
             }
         }
-        item { Muted(if (twoWay) "单端新增和修改自动传播；两端同时修改时保留冲突。历史保存在 OneDrive 的“轻同步历史”中，会占用空间。删除目前只报告待确认项，不会执行。旧任务切换曲库模式时，请重新选择手机文件夹授予写入权限。"
+        item { Muted(if (twoWay) "单端新增和修改自动传播；两端同时修改时保留冲突。历史保存在 OneDrive 的“轻同步历史”中，会占用空间。下载和恢复使用校验后的临时文件与持久操作记录，旧版保留为隐藏改名副本；历史页可查看操作并恢复为副本。删除默认只提示，需单独启用。旧任务切换曲库模式时，请重新选择手机文件夹授予写入权限。"
             else "未开启覆盖时，只更新本任务此前上传且云端未被修改的文件；其他同名文件会保留并记录冲突。手机与云端文件均不会自动删除。") }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -334,7 +377,7 @@ private fun TaskEditor(existing: SyncTask?, account: Account?, onSave: (SyncTask
                     else onSave(SyncTask(id = existing?.id ?: java.util.UUID.randomUUID().toString(), name = name.trim(),
                         treeUri = uri, localName = localName, remotePath = remote.trim().trim('/'), driveId = existing?.driveId ?: account.driveId,
                         intervalMinutes = interval, wifiOnly = wifi, chargingOnly = charging, enabled = existing?.enabled ?: true,
-                        overwrite = if (twoWay) false else overwrite, twoWay = twoWay))
+                        overwrite = if (twoWay) false else overwrite, twoWay = twoWay, syncDeletes = twoWay && syncDeletes))
                 }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColorsPrimary()) { Text("保存任务") }
             }
         }

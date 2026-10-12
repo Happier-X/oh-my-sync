@@ -57,6 +57,8 @@ class SyncWorker(context: Context, parameters: WorkerParameters) : CoroutineWork
                     val issues = result.conflicts.size + result.pendingDeletes.size
                     val details = buildString {
                         append("曲库同步：上传 ${result.uploaded} 个，下载 ${result.downloaded} 个，未变化 ${result.skipped} 个")
+                        if (result.deleted > 0) append("；隔离删除 ${result.deleted} 个（历史保留）")
+                        if (result.recovered > 0) append("；恢复 ${result.recovered} 个中断操作")
                         if (result.conflicts.isNotEmpty()) append("；保留 ${result.conflicts.size} 个冲突：${result.conflicts.first()}")
                         if (result.pendingDeletes.isNotEmpty()) append("；${result.pendingDeletes.size} 个删除待确认：${result.pendingDeletes.first()}")
                     }
@@ -66,6 +68,7 @@ class SyncWorker(context: Context, parameters: WorkerParameters) : CoroutineWork
                 }
                 val remoteRoot = app.cloud.ensureFolder(Paths.segments(task.remotePath))
                 val stamps = app.store.current().stamps.toMutableMap()
+                val retained = app.store.current().artifacts
                 suspend fun walk(directory: DocumentFile, parent: String, prefix: String) {
                     currentCoroutineContext().ensureActive()
                     check(directory.canRead()) { "无法读取文件夹：$prefix" }
@@ -74,6 +77,14 @@ class SyncWorker(context: Context, parameters: WorkerParameters) : CoroutineWork
                         val name = file.name ?: error("无法读取文件名")
                         Paths.validateName(name)
                         val path = if (prefix.isEmpty()) name else "$prefix/$name"
+                        val artifact = retained.find { sameDocument(it.fileUri, file.uri.toString()) ||
+                            (it.treeUri == task.treeUri && it.path == path) }
+                        if (artifact != null) {
+                            check(file.isFile && (artifact.hash == null || open(file).use { LibrarySync.digest(it) } == artifact.hash)) {
+                                "隔离副本已被外部修改，未继续同步：$path"
+                            }
+                            continue
+                        }
                         if (file.isDirectory) {
                             val child = app.cloud.ensureFolder(Paths.segments(task.remotePath) + path.split('/'))
                             walk(file, child, path)

@@ -17,6 +17,7 @@ data class SyncTask(
     val enabled: Boolean = true,
     val overwrite: Boolean = false,
     val twoWay: Boolean = false,
+    val syncDeletes: Boolean = false,
 )
 
 @Serializable
@@ -41,10 +42,38 @@ data class SyncState(
     val stamps: Map<String, FileStamp> = emptyMap(),
     val library: Map<String, LibraryStamp> = emptyMap(),
     val versions: List<LibraryVersion> = emptyList(),
+    val operations: List<LibraryOperation> = emptyList(),
+    val artifacts: List<LibraryArtifact> = emptyList(),
+    val libraryEvents: List<LibraryEvent> = emptyList(),
+    val deleteCandidates: List<DeleteCandidate> = emptyList(),
 )
 
 @Serializable
 data class LibraryStamp(val hash: String?, val etag: String = "")
+
+/** 修改曲库前持久化，恢复时使用记录的目录与内容，不能套用编辑后的任务。 */
+@Serializable
+data class LibraryOperation(
+    val id: String = UUID.randomUUID().toString(),
+    val taskId: String, val driveId: String, val treeUri: String, val remotePath: String,
+    val path: String, val kind: String,
+    val oldHash: String? = null, val newHash: String? = null, val etag: String = "",
+    val remoteId: String = "", val remoteParent: String = "", val archiveParent: String = "",
+    val temporaryName: String = ".ohmysync-${UUID.randomUUID()}.part",
+    val backupName: String = ".ohmysync-${UUID.randomUUID()}.backup",
+    val ready: Boolean = false,
+) {
+    val key: String get() = "$driveId/$taskId/$remotePath/$path"
+}
+
+@Serializable
+data class LibraryArtifact(val taskId: String, val treeUri: String, val path: String, val hash: String?, val kind: String, val fileUri: String = "")
+
+@Serializable
+data class LibraryEvent(val taskId: String, val path: String, val message: String, val time: Long = System.currentTimeMillis())
+
+@Serializable
+data class DeleteCandidate(val key: String, val direction: String, val hash: String, val firstSeen: Long)
 
 @Serializable
 data class LibraryVersion(val taskId: String, val path: String, val hash: String,

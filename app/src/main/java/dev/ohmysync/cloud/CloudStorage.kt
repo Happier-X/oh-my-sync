@@ -4,6 +4,7 @@ import java.io.InputStream
 
 /** 新的云盘提供方只需实现目录、查询和上传接口。 */
 interface CloudStorage {
+    suspend fun move(item: CloudItem, parent: String, name: String): CloudItem
     suspend fun listFiles(parent: String): List<RemoteEntry>
     suspend fun download(item: CloudItem, output: java.io.OutputStream)
     suspend fun inspectFolder(parts: List<String>): CloudFolder
